@@ -6,6 +6,8 @@
 #   bash tools/fcm_helper.sh home       press Home (puts the app in the background for T2)
 #   bash tools/fcm_helper.sh shade      pull down the notification shade
 #   bash tools/fcm_helper.sh recents    open recent apps (swipe the app away for T3; NOT force-stop)
+#   bash tools/fcm_helper.sh notify NAME  open the notification shade, wait, then screenshot it
+#   bash tools/fcm_helper.sh launch     open the app from its launcher icon
 set -uo pipefail
 
 PKG="com.saketh.ica14_fcm"
@@ -22,7 +24,7 @@ case "${1:-}" in
     rel="$(adb shell getprop ro.build.version.release | tr -d '\r')"
     api="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
     perm="$(adb shell dumpsys package "$PKG" | tr -d '\r' | grep -o 'android.permission.POST_NOTIFICATIONS: granted=[a-z]*' | head -1)"
-    gms="$(adb shell pm list packages com.google.android.gms | tr -d '\r' | head -1)"
+    gms="$(adb shell pm list packages com.google.android.gms | tr -d '\r' | grep -x 'package:com.google.android.gms')"
     { echo "Device: $model, Android $rel (API $api)"
       echo "Notification permission: ${perm:-not found (is the app installed?)}"
       echo "Google Play services: ${gms:-NOT installed (use a Google Play emulator image)}"
@@ -39,7 +41,12 @@ case "${1:-}" in
     name="${2:?usage: fcm_helper.sh shot NAME}"
     adb exec-out screencap -p > "docs/screenshots/$name.png" && echo "Saved docs/screenshots/$name.png" ;;
   home)    adb shell input keyevent KEYCODE_HOME ;;
-  shade)   adb shell cmd statusbar expand-notifications ;;
+  shade)   adb shell cmd statusbar expand-notifications; sleep 2 ;;
+  notify)
+    name="${2:?usage: fcm_helper.sh notify NAME}"
+    adb shell cmd statusbar expand-notifications; sleep 3
+    adb exec-out screencap -p > "docs/screenshots/$name.png" && echo "Saved docs/screenshots/$name.png (notification shade)" ;;
+  launch)  adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 && echo "Launched $PKG" ;;
   recents) adb shell input keyevent KEYCODE_APP_SWITCH ;;
-  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
