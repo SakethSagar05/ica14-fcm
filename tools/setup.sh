@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# ICA 14 one-shot setup (run in Terminal on your Mac):
+#   bash ~/"MAD folder/ica14_fcm/tools/setup.sh"            # uses Firebase project ica13-auth
+#   bash ~/"MAD folder/ica14_fcm/tools/setup.sh" <project-id>
+# Steps: platform folders -> packages -> Android config -> flutterfire configure
+#        -> analyze + debug build -> git -> (optional) GitHub push
+set -euo pipefail
+
+PROJECT_ID="${1:-ica13-auth}"
+PKG="com.saketh.ica14_fcm"
+cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
+
+export PATH="$PATH:$HOME/.pub-cache/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/flutter/bin:$HOME/development/flutter/bin"
+SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+export PATH="$PATH:$SDK/platform-tools:$SDK/emulator"
+
+step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33m%s\033[0m\n' "$*"; }
+
+command -v flutter >/dev/null || { echo "flutter is not on PATH. Open a terminal where 'flutter --version' works and re-run."; exit 1; }
+flutter --version 2>&1 | sed -n '1p' || true   # sed reads all output (head would break the pipe)
+
+step "1/7 Android platform folder (keeps the hand-written lib/, assets/, pubspec.yaml, README.md)"
+if [ ! -d android ]; then
+  TMP="$(mktemp -d)"
+  mv lib assets pubspec.yaml README.md "$TMP"/
+  flutter create --org com.saketh --project-name ica14_fcm --platforms android .
+  rm -rf lib pubspec.yaml README.md test   # generated counter app + its test do not apply here
+  mv "$TMP"/lib "$TMP"/assets "$TMP"/pubspec.yaml "$TMP"/README.md .
+  rm -rf "$TMP"
+else
+  echo "android/ exists, skipping flutter create"
+fi
+
+if ! grep -q "ICA14 Firebase" .gitignore 2>/dev/null; then
+  cat >> .gitignore <<'GI'
+
+# ICA14 Firebase / local-only files (regenerate with tools/setup.sh)
+lib/firebase_options.dart
+android/app/google-services.json
+firebase.json
+*.keystore
+*.jks
+key.properties
+GI
+fi
+
+step "2/7 Packages (course baseline: firebase_core 4.x + firebase_messaging 16.x)"
+BASELINE=yes
+if ! flutter pub get; then
+  warn "Baseline versions did not resolve; falling back to the latest firebase_core/firebase_messaging."
+  flutter pub add firebase_core firebase_messaging
+  BASELINE=no
+fi
+
+step "3/7 Android config: INTERNET permission, app label, minSdk >= 23"
+MANIFEST=android/app/src/main/AndroidManifest.xml
+grep -q 'android.permission.INTERNET' "$MANIFEST" || \
+  perl -0pi -e 's/(<manifest[^>]*>)/$1\n    <uses-permission android:name="android.permission.INTERNET" \/>/' "$MANIFEST"
+perl -pi -e 's/android:label="ica14_fcm"/android:label="ICA14 FCM"/' "$MANIFEST"
+if [ -f android/app/build.gradle.kts ]; then
+  perl -pi -e 's/minSdk = flutter\.minSdkVersion/minSdk = maxOf(flutter.minSdkVersion, 23)/' android/app/build.gradle.kts
+elif [ -f android/app/build.gradle ]; then
+  perl -pi -e 's/minSdkVersion flutter\.minSdkVersion/minSdkVersion Math.max(flutter.minSdkVersion, 23)/; s/minSdk = flutter\.minSdkVersion/minSdk = Math.max(flutter.minSdkVersion, 23)/' android/app/build.gradle
+fi
+
+step "4/7 Firebase CLI + FlutterFire configure (project: $PROJECT_ID, Android app: $PKG)"
+command -v firebase >/dev/null || npm install -g firebase-tools
+firebase projects:list >/dev/null 2>&1 || firebase login --reauth
+command -v flutterfire >/dev/null || dart pub global activate flutterfire_cli
+flutterfire configure --project="$PROJECT_ID" --platforms=android --android-package-name="$PKG" --yes
+test -f lib/firebase_options.dart && echo "lib/firebase_options.dart generated OK"
+
+step "5/7 Analyzer + debug build"
+mkdir -p docs/screenshots
+flutter analyze 2>&1 | tee docs/analyze_output.txt || warn "(analyzer reported issues above; not fatal)"
+if ! flutter build apk --debug; then
+  if [ "$BASELINE" = yes ]; then
+    warn "Android build failed on the 4.x/16.x baseline; retrying once with the latest firebase packages."
+    flutter pub add firebase_core firebase_messaging
+    BASELINE=no
+    flutter build apk --debug
+  else
+    exit 1
+  fi
+fi
+
+{
+  flutter --version
+  echo
+  firebase --version 2>/dev/null </dev/null | sed "s/^/firebase-tools /"
+  dart pub global list 2>/dev/null </dev/null | grep flutterfire_cli || true
+  echo
+  echo "Resolved Firebase packages (pubspec.lock):"
+  for p in firebase_core firebase_messaging; do
+    printf '  %s %s\n' "$p" "$(awk -v p="  $p:" '$0==p{f=1} f&&/version:/{gsub(/"/,"",$2); print $2; exit}' pubspec.lock)"
+  done
+  [ "$BASELINE" = yes ] && echo "Course baseline (core 4.x / messaging 16.x) used." \
+                        || echo "NOTE: baseline did not build here; latest packages used. Disclose this in the reflection."
+} > docs/env.txt 2>&1 || true
+cat docs/env.txt
+
+step "6/7 Git history"
+TRAILER=$'\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_016XgwNWfrRN1hRcpPn9qHCW'
+if [ ! -d .git ]; then
+  git init -q -b main
+  git add -A
+  git rm -r -q --cached --ignore-unmatch lib tools README.md docs
+  git commit -q -m "Set up Flutter Android app with firebase_core/firebase_messaging and promo/default assets${TRAILER}"
+  git add lib
+  git commit -q -m "Add FCMService and payload-driven UI: onMessage, onMessageOpenedApp, getInitialMessage, validation${TRAILER}"
+  git add -A
+  git commit -q -m "Add README, setup script and adb test helper${TRAILER}" || true
+fi
+git log --oneline | cat
+
+step "7/7 GitHub (optional)"
+if command -v gh >/dev/null && gh auth status >/dev/null 2>&1 && ! git remote get-url origin >/dev/null 2>&1; then
+  read -r -p "Create PUBLIC GitHub repo 'ica14-fcm' and push? [y/N] " ans
+  if [[ "$ans" =~ ^[Yy]$ ]]; then
+    gh repo create ica14-fcm --public --source=. --remote=origin --push
+    gh repo view --json url -q .url
+  fi
+else
+  echo "Skipping auto-push (gh missing/not logged in, or origin already set)."
+  echo "Manual: git remote add origin https://github.com/<you>/ica14-fcm.git && git push -u origin main"
+fi
+
+printf '\n\033[1;32mSetup done.\033[0m Next: start your Google Play emulator, then run:\n'
+echo "  cd \"$ROOT\" && flutter run"
